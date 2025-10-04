@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir)",
+      "Bash(where python)",
+      "Bash(python:*)",
+      "Bash(venvScripts:*)",
+      "Bash(pip install:*)",
+      "Bash(.venvScriptsactivate)",
+      "Bash(cmd /c:*)",
+      "Bash(venvScriptspip.exe install psutil matplotlib)",
+      "Bash(./venv/Scripts/pip.exe install psutil matplotlib)",
+      "Bash(dir:*)",
+      "Bash(C:msys64ucrt64binpython.exe -m venv venv)",
+      "Bash(python.exe -m venv:*)",
+      "Bash(venv/bin/pip install:*)",
+      "Bash(venv/bin/pip:*)",
+      "Bash(./setup.bat)",
+      "Bash(scoop:*)",
+      "Read(//c/Users/dande/scoop/apps//**)",
+      "Bash(/c/Users/dande/scoop/apps/python/current/python.exe -m venv venv)",
+      "Bash(venv/Scripts/pip.exe install:*)",
+      "Bash(venv/Scripts/python.exe -c \"import psutil; import matplotlib; print(''SUCCESS: All packages working!''); print(f''psutil version: {psutil.__version__}''); print(f''matplotlib version: {matplotlib.__version__}'')\")",
+      "Bash(run.bat)",
+      "Bash(./run.bat)",
+      "Bash(venvScriptspython.exe:*)",
+      "Bash(venv/Scripts/python.exe:*)",
+      "Bash(powershell:*)",
+      "Bash(findstr:*)",
+      "WebSearch",
+      "Bash(echo $PATH)",
+      "Bash(tr:*)",
+      "Bash(ren:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
