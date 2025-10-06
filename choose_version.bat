@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0"
 REM CPU Monitor Version Chooser
 REM Interactive menu to choose which version to run
 
@@ -29,15 +30,14 @@ REM Show menu
 :menu
 echo.
 echo Choose version to run:
-echo 1. GUI Version (Recommended)
+echo 1. GUI Version - DearPyGui (Recommended - GPU Accelerated)
 echo 2. Command Line Version
-echo 3. Run Tests
-echo 4. Exit
+echo 3. Exit
 echo.
-set /p choice="Enter your choice (1-4): "
+set /p choice="Enter your choice (1-3): "
 
 if "%choice%"=="1" (
-    echo Starting GUI version...
+    echo Starting DearPyGui version (GPU-accelerated)...
     venv\Scripts\python.exe cpu_monitor_gui.py
     if errorlevel 1 (
         echo.
@@ -53,10 +53,6 @@ if "%choice%"=="1" (
         pause
     )
 ) else if "%choice%"=="3" (
-    echo Running tests...
-    venv\Scripts\python.exe test_without_deps.py
-    pause
-) else if "%choice%"=="4" (
     goto end
 ) else (
     echo Invalid choice. Please try again.

@@ -65,30 +65,43 @@ if errorlevel 1 (
 echo.
 echo Step 2: Installing dependencies...
 
-REM Install packages in venv
-echo Installing psutil and matplotlib...
-venv\Scripts\pip.exe install psutil matplotlib
+REM Install core packages in venv
+echo Installing psutil, matplotlib, dearpygui, and pywin32...
+venv\Scripts\pip.exe install psutil matplotlib dearpygui pywin32
 if errorlevel 1 (
-    echo ERROR: Failed to install packages
+    echo ERROR: Failed to install core packages
     echo.
     echo Try running this manually:
     echo   venv\Scripts\activate
-    echo   pip install psutil matplotlib
+    echo   pip install psutil matplotlib dearpygui pywin32
     pause
     exit /b 1
 )
 
+REM Install pydivert from local wheel if available, otherwise from PyPI
 echo.
-echo Step 3: Testing installation...
-venv\Scripts\python.exe -c "import psutil; import matplotlib; print('SUCCESS: All packages working!')"
+if exist "wheels\pydivert-*.whl" (
+    echo Installing pydivert from local wheel...
+    for %%f in (wheels\pydivert-*.whl) do (
+        venv\Scripts\pip.exe install "%%f"
+    )
+) else (
+    echo Installing pydivert from PyPI...
+    venv\Scripts\pip.exe install pydivert
+)
+
 if errorlevel 1 (
-    echo WARNING: Package import test failed
-    goto :show_usage
+    echo WARNING: Failed to install pydivert
+    echo Network monitoring will not be available until pydivert is installed
+    echo You can install it later from the GUI
 )
 
 echo.
-echo Step 4: Testing CPU Monitor functionality...
-venv\Scripts\python.exe test_without_deps.py
+echo Step 3: Testing installation...
+venv\Scripts\python.exe -c "import psutil; import matplotlib; import dearpygui.dearpygui; print('SUCCESS: All packages working!')"
+if errorlevel 1 (
+    echo WARNING: Package import test failed
+)
 
 :show_usage
 echo.
@@ -100,14 +113,15 @@ echo Your CPU Monitor is now self-contained with its own virtual environment.
 echo.
 echo To run the CPU Monitor:
 echo.
-echo GUI Version (Recommended):
+echo GUI Version - DearPyGui (Recommended - GPU Accelerated):
 echo   venv\Scripts\python.exe cpu_monitor_gui.py
+echo   Or double-click: run.bat
 echo.
 echo Command Line Version:
 echo   venv\Scripts\python.exe cpu_monitor.py
 echo.
-echo Or use the launcher:
-echo   run_monitor.bat
+echo Or use the interactive launcher:
+echo   choose_version.bat
 echo.
 echo Configuration:
 echo   Edit config.ini to customize settings

@@ -30,7 +30,19 @@
       "WebSearch",
       "Bash(echo $PATH)",
       "Bash(tr:*)",
-      "Bash(ren:*)"
+      "Bash(ren:*)",
+      "Bash(del test_perf.py)",
+      "Bash(./venv/Scripts/python.exe -m pip install:*)",
+      "Bash(tree:*)",
+      "Bash(grep:*)",
+      "Bash(timeout:*)",
+      "Bash(if exist __pycache__cpu_monitor_gui.cpython-313.pyc del __pycache__cpu_monitor_gui.cpython-313.pyc)",
+      "Bash(venv/Scripts/pip.exe download:*)",
+      "Bash(./venv/Scripts/pip.exe download pydivert --dest wheels)",
+      "Bash(./venv/Scripts/pip.exe download pydivert --dest ./wheels)",
+      "Bash(./venv/Scripts/python.exe -c \"import pydivert; print(''PyDivert version:'', pydivert.__version__)\")",
+      "Bash(if exist __pycache__ rmdir /s /q __pycache__)",
+      "Bash(./venv/Scripts/python.exe -c \"import pydivert; print(f''PyDivert version: {pydivert.__version__}'')\")"
     ],
     "deny": [],
     "ask": []
