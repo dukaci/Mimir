@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+logs/
+exports/
+settings.json
+run.log
+run.err
+mimir_shot.png
+.pytest_cache/

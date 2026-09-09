@@ -1,0 +1,27 @@
+{
+  "name": "Mimir",
+  "group": "Tools",
+  "description": "Per-process resource monitor with history and peaks: CPU, memory, disk, network, GPU. Docks as a native pane.",
+  "tags": [
+    "python",
+    "dearpygui",
+    "monitor"
+  ],
+  "targets": [
+    {
+      "id": "app",
+      "name": "Monitor",
+      "kind": "native",
+      "cmd": "venv\\Scripts\\pythonw.exe -m mimir",
+      "windowTitle": "^Mimir$",
+      "icon": "assets\\mimir.ico"
+    },
+    {
+      "id": "admin",
+      "name": "Monitor as admin (per-process network)",
+      "kind": "external",
+      "cmd": "run_admin.bat",
+      "icon": "assets\\mimir.ico"
+    }
+  ]
+}

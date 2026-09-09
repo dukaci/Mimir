@@ -1,186 +1,108 @@
-# Mimir - Real-time CPU Process Monitor
+# Mimir
 
-GPU-accelerated, real-time process monitoring with intelligent grouping and historical analysis. Built with DearPyGui for maximum performance.
+Per-process resource monitor for Windows 11 (Linux planned) that keeps history
+and peaks. Think Task Manager's *Processes* tab, but every value is charted over
+time and the peak of every metric is remembered with the moment it happened.
 
-## ✨ Features
+Tracked per process: CPU, memory (private working set), disk read/write,
+network download/upload (admin only), GPU utilisation (NVIDIA), thread count.
+Tracked system-wide: CPU, memory, disk, network, GPU utilisation and VRAM.
 
-- **🚀 GPU-Accelerated Rendering**: Built with DearPyGui for buttery-smooth 60 FPS updates
-- **📊 Real-time CPU Charts**: Live visualization of process CPU usage with zero lag
-- **👥 Process Grouping**: Group multiple instances of the same process (e.g., all Chrome tabs)
-- **🎯 Smart Selection**: Click to view individual processes or entire groups with persistent selection
-- **⚡ Multi-threaded Sampling**: Parallel processing with thread pool executor
-- **🎨 Modern Dark Theme**: Beautiful, customizable GPU-rendered interface
-- **💾 Persistent Selection**: Your selection stays active across UI updates (no more reset bugs!)
-- **🔧 Live Configuration**: Change settings without restart
-- **📈 Historical Analysis**: Analyze CPU usage patterns over time
-- **Windows Optimized**: Handles Windows process permissions correctly
+## Run
 
-## 🚀 Quick Start
-
-### Option 1: Quick Launch (Recommended)
-```bash
-# First time setup (installs DearPyGui + dependencies)
-setup.bat
-
-# Run the monitor
-run.bat
+```bat
+setup.bat        :: once - creates venv\ and installs requirements
+run.bat          :: start Mimir
+run_admin.bat    :: start elevated - enables per-process network stats
 ```
 
-### Option 2: Interactive Launcher
-```bash
-choose_version.bat
-# Choose: 1 = DearPyGui GUI (GPU-accelerated) | 2 = CLI | 3 = Tests
+Or `venv\Scripts\python.exe -m mimir`. `--help` lists options
+(`--interval`, `--no-network`, `--log-level`, `--shot`).
+
+## Using it
+
+- **Tiles** at the top show live system totals with a 60 s sparkline and the
+  all-time peak. Click a tile to chart that resource for the whole system.
+- **Process table**: click a header to sort, click a row to chart that process
+  (or that group of same-named processes). Right-click a row to end it: after
+  a confirmation the process, its children by default, and every instance in a
+  grouped row are terminated with TerminateProcess (SeDebugPrivilege is used
+  when elevated, `taskkill /F /T` is the fallback). Protected system processes
+  cannot be ended from user mode and are reported. Type in the filter box to
+  search.
+  "Group by name" merges every `chrome.exe` into one row and sums its values.
+  Peak columns are since the app started (or since *Clear history*).
+- **Chart**: pick a resource (CPU, Memory, Disk, Network, GPU) and a scope
+  (System, Top processes, Selected). The time axis is wall-clock time; the peak
+  inside the visible window is annotated. Resources with two units (GPU shows
+  utilisation and VRAM) get two stacked charts; in Top processes each chart
+  ranks its own leaders, with one colour per process across both. A tile
+  changes only the resource, the scope is kept.
+- **Export CSV** writes the visible scope's full history to `exports\`.
+- **Settings** (gear button) adjusts the sampling interval, retained history,
+  ranking window, chart span and so on. Saved to `settings.json` on exit.
+
+## How processes are read
+
+On Windows every sample is one `NtQuerySystemInformation` call, the same API
+Task Manager uses. It returns CPU times, private working set, I/O counters and
+thread counts for all processes at once in a few milliseconds, with no
+per-process handles, so protected processes are included. psutil is the
+fallback on other platforms (and needs about 100x longer per sample here).
+
+## GPU figures
+
+Per-process GPU utilisation and dedicated VRAM come from the Windows
+performance counters `GPU Engine` and `GPU Process Memory`, the data behind
+Task Manager's GPU columns. They work for NVIDIA, AMD and Intel, need no admin
+rights, and cost under a millisecond per sample. NVML (NVIDIA only) supplies
+the whole-GPU utilisation, VRAM used/total and the adapter name; on Linux it
+also supplies the per-process figures, since WDDM hides those from NVML on
+Windows. A process's "GPU" is its busiest engine, as in Task Manager.
+
+## Network attribution and why it is safe
+
+psutil cannot say which process a packet belongs to, so Mimir (only when run
+as administrator) opens the WinDivert driver in **SNIFF** mode. In that mode
+the driver hands Mimir a *copy* of each packet; the real packet is never
+queued, delayed, or re-injected by Mimir, so a slow or crashed Mimir cannot
+affect traffic. Each packet is matched to its owning PID through the socket
+table from `psutil.net_connections()`.
+
+The previous version opened WinDivert in *divert* mode, which pulled every
+packet on the machine into Python and required Mimir to send it back out. Any
+stall in the Python loop then delayed or dropped real traffic, which is what
+made the connection collapse. That code path no longer exists.
+
+## Layout
+
+```
+mimir/
+  __main__.py      CLI entry, logging, wiring
+  settings.py      dataclass settings, JSON persistence
+  metrics.py       metric definitions, formatting
+  history.py       thread-safe snapshot store, peaks, rankings, series queries
+  sampler.py       background psutil/NVML sampling thread
+  netcapture.py    passive per-process network attribution (WinDivert sniff)
+  winproc.py       one-call process snapshot via NtQuerySystemInformation (Windows)
+  gpu.py           optional NVML wrapper
+  platform.py      OS specifics: admin check, elevation, font paths
+  ui/theme.py      colours, fonts, DearPyGui themes
+  ui/app.py        the window
+assets/          window icon (mimir.ico) and logo (mimir.png)
+tools/make_icon.py  regenerates the icon files (needs Pillow, dev only)
+tests/             pytest unit tests for the store, metrics and settings
 ```
 
-### Option 3: Direct Python
-```bash
-venv\Scripts\python.exe cpu_monitor_gui.py
+Design rules: the sampler never touches the UI; the UI only reads the store on
+the render thread; anything OS-specific lives in `platform.py` or behind the
+`NetworkAttributor` interface so a Linux backend can be added without touching
+the rest.
+
+## Development
+
+```bat
+venv\Scripts\python.exe -m pip install -e .[dev]
+venv\Scripts\python.exe -m pytest
+venv\Scripts\python.exe -m mimir --shot 8 --shot-file shot.png   :: headless screenshot
 ```
-
-## Files
-
-### Main Scripts
-- `cpu_monitor_gui.py` - GUI version with real-time charts and controls
-- `cpu_monitor.py` - Command line version with interactive menu
-- `config.ini` - Configuration file for sampling and display settings
-- `requirements.txt` - Python package dependencies
-
-### Launcher Scripts
-- `Run_mimir.bat` - **One-click launcher** (auto-setup + GUI)
-- `setup.bat` - Setup script (creates venv, installs dependencies)
-- `choose_version.bat` - Interactive menu to choose GUI/CLI/Tests
-
-### Test Scripts
-- `test_without_deps.py` - Dependency-free functionality test
-
-## Configuration
-
-Edit `config.ini` to customize:
-
-```ini
-[monitor]
-sample_interval = 1.0    # Seconds between samples
-history_length = 300     # Number of samples to keep
-
-[display]
-top_processes = 10       # Max processes to show individually
-cpu_threshold = 1.0      # Minimum CPU % to track
-```
-
-## 📖 How to Use
-
-### Viewing Individual Processes
-1. Process table shows top CPU consumers ranked
-2. Click **"View Process"** button on any row
-3. Chart instantly displays that process's CPU history
-4. Selection persists across all updates
-
-### Viewing Process Groups
-1. Enable **"Group Processes"** checkbox
-2. Processes with same name are grouped together (e.g., chrome.exe)
-3. Click **"View Group"** button
-4. Chart shows **summed CPU** of all instances in the group
-5. Selection remains active indefinitely
-
-### Viewing All Processes
-- Click **"Clear Selection"** button
-- Chart shows combined top processes
-
-### Live Settings
-- **Sample Interval**: How often to sample CPU (0.1-10s)
-- **Top Processes**: Number of processes to track (1-20)
-- **Filter Idle**: Hide "System Idle Process"
-- **Group Processes**: Combine processes by name
-
-## 🛠️ Requirements
-
-- **Windows 10/11**
-- **Python 3.8+** (Python 3.13 recommended)
-- **DearPyGui** (GPU-accelerated UI)
-- **psutil** (system monitoring)
-- **matplotlib** (fallback charting - optional)
-
-## 💡 Performance Comparison
-
-| Metric | Old (Tkinter) | New (DearPyGui) |
-|--------|---------------|-----------------|
-| **Frame Rate** | ~0.5 FPS (flickering) | 60 FPS (smooth) |
-| **Selection** | Lost on update ❌ | Persistent ✅ |
-| **Group Charts** | Broken ❌ | Working ✅ |
-| **Rendering** | CPU (slow) | GPU (fast) |
-| **UI Updates** | Full rebuild | Direct updates |
-| **Threading** | Race conditions | Clean sync |
-| **CPU Overhead** | ~3-5% | <1% |
-
-## 💡 Usage Tips
-
-1. **Use GPU Version** - DearPyGui is 10x faster than old Tkinter version
-2. **Enable Grouping** - Great for monitoring browsers, IDEs with multiple processes
-3. **Persistent Selection** - Click once, selection stays active across all updates
-4. **Adjust Sample Rate** - Lower (0.5s) for detail, higher (2s) for longer history
-5. **Run as Admin** - To monitor all system processes without permission errors
-
-## 🔧 Troubleshooting
-
-**Selection resets constantly**
-✅ Fixed in DearPyGui version! Selection is now persistent.
-
-**Group chart shows empty/wrong data**
-✅ Fixed! Make sure to:
-1. Enable "Group Processes" checkbox
-2. Click "View Group" button (not individual process)
-
-**"DearPyGui not found" error**
-Run setup again:
-```bash
-setup.bat
-```
-
-**Permission denied errors**
-Run as administrator to access all processes.
-
-**High memory usage**
-Reduce `history_length` in config.ini (auto-cleanup at 1000 PIDs)
-
-## Examples
-
-### Monitoring Development Workload
-- Set `sample_interval = 0.5` for detailed monitoring
-- Set `top_processes = 15` to see more applications
-- Perfect for tracking compiler, IDE, and browser usage
-
-### Long-term System Monitoring
-- Set `sample_interval = 5.0` for longer sampling
-- Set `history_length = 720` (1 hour at 5s intervals)
-- Export data periodically for analysis
-
-### Gaming Performance
-- Set `sample_interval = 0.2` for high-resolution monitoring
-- Monitor game, Discord, streaming software simultaneously
-- Use CSV export to analyze performance patterns
-
-## 🎨 Technology
-
-**GPU-Accelerated with DearPyGui**
-- Modern GPU rendering for 60 FPS updates
-- Native plotting (no matplotlib lag)
-- Clean event handling (no Tkinter race conditions)
-- Professional dark theme
-- Cross-platform support (Windows/Linux/Mac)
-
-**Architecture**
-- Multi-threaded CPU sampling with ThreadPoolExecutor
-- Thread-safe data structures with mutex locks
-- Persistent selection state (separate from UI)
-- Smart dead PID cleanup (auto-cleanup at 1000 PIDs)
-- Optimized chart updates (60 FPS rendering, 2s data updates)
-
-## 📝 License
-
-Open source tool for educational and personal use. Feel free to modify and extend!
-
-## 🙏 Credits
-
-Built with:
-- [DearPyGui](https://github.com/hoffstadt/DearPyGui) - GPU-accelerated Python GUI framework
-- [psutil](https://github.com/giampaolo/psutil) - Cross-platform process utilities
