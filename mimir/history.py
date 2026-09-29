@@ -9,9 +9,12 @@ Only plain data lives here; nothing in this module touches the UI.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
+from array import array
 from collections import deque
+from operator import add
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
@@ -23,20 +26,35 @@ IDLE_NAMES = {"system idle process", "idle"}
 EntityKey = tuple[str, object]   # ("pid", 1234) or ("name", "chrome.exe")
 
 
-class ProcSample:
-    __slots__ = ("pid", "name", "values")
-
-    def __init__(self, pid: int, name: str, values: list[float]):
-        self.pid = pid
-        self.name = name
-        self.values = values      # indexed by PROCESS_METRIC_INDEX
-
-
 @dataclass(slots=True)
 class Snapshot:
+    """One sampling tick. Processes are stored as columns: about 84 bytes each, where
+    one Python object per value took about 430."""
     ts: float                                # epoch seconds
-    procs: dict[int, ProcSample]
+    pids: array                              # 'I'
+    names: tuple[str, ...]                   # interned, so every tick shares the same str objects
+    values: array                            # 'd', N_METRICS per process, indexed by PROCESS_METRIC_INDEX
     system: dict[str, float]                 # keyed by SYSTEM metric id
+
+    @classmethod
+    def pack(cls, ts: float, procs: Iterable[tuple[int, str, list[float]]],
+             system: dict[str, float]) -> "Snapshot":
+        pids, names, values = array("I"), [], array("d")
+        for pid, name, vals in procs:
+            pids.append(pid)
+            names.append(sys.intern(name))
+            values.extend(vals)
+        return cls(ts, pids, tuple(names), values, system)
+
+    def __len__(self) -> int:
+        return len(self.pids)
+
+    def procs(self):
+        """(pid, name, values) per process; values is a new list the caller may change."""
+        flat = self.values.tolist()
+        for k, pid in enumerate(self.pids):
+            b = k * N_METRICS
+            yield pid, self.names[k], flat[b:b + N_METRICS]
 
 
 @dataclass(slots=True)
@@ -108,14 +126,14 @@ class HistoryStore:
 
     def _update_peaks(self, snap: Snapshot) -> None:
         by_name: dict[str, list[float]] = {}
-        for pid, ps in snap.procs.items():
+        for pid, name, vals in snap.procs():
             self._last_seen[pid] = snap.ts
-            self._bump(("pid", pid), ps.values, snap.ts)
-            agg = by_name.get(ps.name)
+            self._bump(("pid", pid), vals, snap.ts)
+            agg = by_name.get(name)
             if agg is None:
-                by_name[ps.name] = list(ps.values)
+                by_name[name] = vals
             else:
-                for i, v in enumerate(ps.values):
+                for i, v in enumerate(vals):
                     agg[i] += v
         for name, vals in by_name.items():
             self._bump(("name", name), vals, snap.ts)
@@ -191,15 +209,18 @@ class HistoryStore:
         for snap in snaps:
             totals = [0.0] * len(idx)
             if kind == "pid":
-                ps = snap.procs.get(ident)
-                if ps is not None:
+                try:
+                    base = snap.pids.index(ident) * N_METRICS
+                except ValueError:
+                    base = None
+                if base is not None:
                     for j, i in enumerate(idx):
-                        totals[j] = ps.values[i]
+                        totals[j] = snap.values[base + i]
             else:
-                for pid, ps in snap.procs.items():
-                    if ps.name == ident or (pid_set is not None and pid in pid_set):
+                for pid, name, vals in snap.procs():
+                    if name == ident or (pid_set is not None and pid in pid_set):
                         for j, i in enumerate(idx):
-                            totals[j] += ps.values[i]
+                            totals[j] += vals[i]
             for j, m in enumerate(metric_ids):
                 bundle.values[m].append(totals[j])
         return bundle
@@ -219,12 +240,13 @@ class HistoryStore:
                     by_pid[pid] = i
         out = [[0.0] * len(snaps) for _ in entities]
         for t, snap in enumerate(snaps):
-            for pid, ps in snap.procs.items():
+            names, values = snap.names, snap.values
+            for k, pid in enumerate(snap.pids):
                 i = by_pid.get(pid)
                 if i is None:
-                    i = by_name.get(ps.name)
+                    i = by_name.get(names[k])
                 if i is not None:
-                    out[i][t] += ps.values[mi]
+                    out[i][t] += values[k * N_METRICS + mi]
         return [s.ts for s in snaps], out
 
     def system_series(self, metric_ids: Iterable[str], seconds: float) -> SeriesBundle:
@@ -238,30 +260,48 @@ class HistoryStore:
 
     def rankings(self, seconds: float, grouped: bool, hide_idle: bool = True,
                  name_filter: str = "", sort_metric: str = "cpu", sort_field: str = "current",
-                 descending: bool = True, limit: int = 50, only_alive: bool = False) -> list[EntityRow]:
-        """Aggregate the ranking window into one row per entity."""
+                 descending: bool = True, limit: int = 50, only_alive: bool = False,
+                 cpu_smooth: float = 0.0) -> list[EntityRow]:
+        return rank(self.aggregate(seconds, grouped, hide_idle, name_filter, cpu_smooth),
+                    sort_metric, sort_field, descending, limit, only_alive)
+
+    def aggregate(self, seconds: float, grouped: bool, hide_idle: bool = True, name_filter: str = "",
+                  cpu_smooth: float = 0.0) -> list[EntityRow]:
+        """The ranking window as one unsorted row per entity; rank() orders and cuts it.
+
+        The current CPU value is the mean over the last cpu_smooth seconds (within the
+        ranking window), so the column and a sort on it do not jump with every sample.
+        """
         snaps = self.window(seconds)
         if not snaps:
             return []
         last = snaps[-1]
+        i_cpu = PROCESS_METRIC_INDEX["cpu"]
+        recent = [s for s in snaps if s.ts > last.ts - cpu_smooth] or [last]
+        recent_from = recent[0].ts
         name_filter = name_filter.lower().strip()
         acc: dict[EntityKey, dict] = {}
+        excluded: dict[str, bool] = {}              # name -> hidden by hide_idle or the filter
 
+        # Per-metric arithmetic runs as map() over whole lists: a C loop, where a Python
+        # loop per value made this the most expensive call in the UI.
         for snap in snaps:
-            per: dict[EntityKey, tuple[list[float], set[int], str]] = {}
-            for pid, ps in snap.procs.items():
-                lname = ps.name.lower()
-                if hide_idle and lname in IDLE_NAMES:
+            per: dict[EntityKey, list] = {}             # key -> [values, pids, name]
+            for pid, name, pvals in snap.procs():
+                ex = excluded.get(name)
+                if ex is None:
+                    lname = name.lower()
+                    ex = excluded[name] = ((hide_idle and lname in IDLE_NAMES)
+                                           or bool(name_filter and name_filter not in lname))
+                if ex:
                     continue
-                if name_filter and name_filter not in lname:
-                    continue
-                key = ("name", ps.name) if grouped else ("pid", pid)
+                key = ("name", name) if grouped else ("pid", pid)
                 row = per.get(key)
                 if row is None:
-                    per[key] = (list(ps.values), {pid}, ps.name)
+                    per[key] = [pvals, {pid}, name]
                 else:
                     vals = row[0]
-                    for i, v in enumerate(ps.values):
+                    for i, v in enumerate(pvals):
                         vals[i] += v
                     row[1].add(pid)
             is_last = snap is last
@@ -270,7 +310,7 @@ class HistoryStore:
                 if a is None:
                     a = acc[key] = {"name": name, "pids": set(), "sum": [0.0] * N_METRICS,
                                     "max": [0.0] * N_METRICS, "cur": [0.0] * N_METRICS,
-                                    "alive": False, "n": 0}
+                                    "alive": False, "n": 0, "cpu_recent": 0.0}
                 a["pids"] |= pids
                 a["n"] += 1
                 s, mx = a["sum"], a["max"]
@@ -278,6 +318,8 @@ class HistoryStore:
                     s[i] += v
                     if v > mx[i]:
                         mx[i] = v
+                if snap.ts >= recent_from:
+                    a["cpu_recent"] += vals[i_cpu]
                 if is_last:
                     a["cur"] = vals
                     a["alive"] = True
@@ -286,29 +328,34 @@ class HistoryStore:
         with self._lock:
             rows = []
             for key, a in acc.items():
-                if only_alive and not a["alive"]:
-                    continue
+                a["cur"][i_cpu] = a["cpu_recent"] / len(recent)
                 peaks = self._peaks.get(key)
                 rows.append(EntityRow(
                     key=key, name=a["name"], pids=sorted(a["pids"]), alive=a["alive"],
                     current=a["cur"], average=[v / n for v in a["sum"]], maximum=a["max"],
                     peaks=list(peaks) if peaks else [None] * N_METRICS, samples=a["n"],
                 ))
+        return rows
 
-        mi = PROCESS_METRIC_INDEX.get(sort_metric, 0)
 
-        def sort_key(r: EntityRow) -> float:
-            if sort_field == "peak":
-                p = r.peaks[mi]
-                return p.value if p else 0.0
-            if sort_field == "average":
-                return r.average[mi]
-            if sort_field == "maximum":
-                return r.maximum[mi]
-            return r.current[mi]
+def rank(rows: list[EntityRow], sort_metric: str = "cpu", sort_field: str = "current",
+         descending: bool = True, limit: int = 50, only_alive: bool = False) -> list[EntityRow]:
+    """The first `limit` rows of aggregate() output in the requested order."""
+    if only_alive:
+        rows = [r for r in rows if r.alive]
+    mi = PROCESS_METRIC_INDEX.get(sort_metric, 0)
 
-        rows.sort(key=sort_key, reverse=descending)
-        return rows[:limit]
+    def sort_key(r: EntityRow) -> float:
+        if sort_field == "peak":
+            p = r.peaks[mi]
+            return p.value if p else 0.0
+        if sort_field == "average":
+            return r.average[mi]
+        if sort_field == "maximum":
+            return r.maximum[mi]
+        return r.current[mi]
+
+    return sorted(rows, key=sort_key, reverse=descending)[:limit]
 
 
 def system_metric_ids() -> list[str]:

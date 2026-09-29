@@ -28,7 +28,7 @@ class Metric:
     description: str = ""
 
 
-# Per-process metrics. Order matters: ProcSample.values is indexed by position.
+# Per-process metrics. Order matters: Snapshot.values is indexed by position.
 PROCESS_METRICS: list[Metric] = [
     Metric("cpu", "CPU", "CPU", "percent", BLUE, "share of the whole machine's CPU time"),
     Metric("mem", "Memory", "Memory", "bytes", MAUVE, "private working set"),

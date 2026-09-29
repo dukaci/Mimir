@@ -1,6 +1,6 @@
 import time
 
-from mimir.history import HistoryStore, ProcSample, Snapshot
+from mimir.history import HistoryStore, Snapshot
 from mimir.metrics import PROCESS_METRIC_INDEX, PROCESS_METRICS
 
 N = len(PROCESS_METRICS)
@@ -12,11 +12,11 @@ def proc(pid, name, cpu=0.0, mem=0.0):
     v = [0.0] * N
     v[I_CPU] = cpu
     v[I_MEM] = mem
-    return ProcSample(pid, name, v)
+    return pid, name, v
 
 
 def snap(ts, procs, system=None):
-    return Snapshot(ts=ts, procs={p.pid: p for p in procs}, system=system or {})
+    return Snapshot.pack(ts, procs, system or {})
 
 
 def test_peaks_track_value_and_time_per_pid_and_name():
@@ -103,3 +103,18 @@ def test_maxlen_and_clear():
     store.clear()
     assert len(store) == 0
     assert store.peaks_for(("pid", 1)) == [None] * N
+
+
+def test_current_cpu_is_averaged_over_smoothing_window():
+    store = HistoryStore(100)
+    now = time.time()
+    # a.exe spikes on the last sample; b.exe is steady. 5 samples 1 s apart.
+    for i, a_cpu in enumerate([0, 0, 0, 0, 50]):
+        store.append(snap(now - 4 + i, [proc(1, "a.exe", cpu=a_cpu), proc(2, "b.exe", cpu=20)]))
+
+    raw = {r.name: r.current[I_CPU] for r in store.rankings(seconds=30, grouped=True)}
+    assert raw == {"a.exe": 50, "b.exe": 20}
+
+    rows = store.rankings(seconds=30, grouped=True, cpu_smooth=5)
+    assert [r.name for r in rows] == ["b.exe", "a.exe"]     # the spike no longer jumps to the top
+    assert rows[0].current[I_CPU] == 20 and rows[1].current[I_CPU] == 10

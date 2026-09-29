@@ -5,15 +5,21 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import namedtuple
 
 import psutil
 
 from .gpu import GpuMonitor
-from .history import HistoryStore, ProcSample, Snapshot
+from .history import HistoryStore, Snapshot
 from .metrics import PROCESS_METRIC_INDEX, PROCESS_METRICS
 from .netcapture import NetworkAttributor
+from .platform import IS_LINUX, physical_nics
 from .settings import Settings
-from .winproc import create_snapshot_source
+
+if IS_LINUX:
+    from .linproc import create_snapshot_source
+else:
+    from .winproc import create_snapshot_source
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +35,18 @@ _I_THR = PROCESS_METRIC_INDEX["threads"]
 _N = len(PROCESS_METRICS)
 
 _ATTRS = ["pid", "name", "cpu_percent", "memory_info", "io_counters", "num_threads"]
+
+
+_NetTotals = namedtuple("_NetTotals", "bytes_sent bytes_recv")
+
+
+def _net_counters():
+    """Machine-wide byte counters over the NICs that leave the machine (see physical_nics)."""
+    nics = physical_nics()
+    if nics is None:
+        return psutil.net_io_counters()
+    per = [c for n, c in psutil.net_io_counters(pernic=True).items() if n in nics]
+    return _NetTotals(sum(c.bytes_sent for c in per), sum(c.bytes_recv for c in per))
 
 
 class Sampler:
@@ -48,7 +66,7 @@ class Sampler:
         self._io_prev: dict[int, tuple[float, float, float]] = {}   # pid -> (read, write, ts)
         self._sys_prev: tuple[float, object, object] | None = None  # (ts, disk, net)
         self.mem_total = float(psutil.virtual_memory().total)
-        # Fast path: one kernel call for every process (Windows). Falls back to psutil.
+        # Fast path: every process in one pass (Windows kernel call, Linux /proc). Falls back to psutil.
         self._kernel_snapshot = create_snapshot_source()
         self._cpu_prev: dict[int, tuple[float, float]] = {}        # pid -> (cpu_time, ts)
         self.backend = "kernel snapshot" if self._kernel_snapshot else "psutil"
@@ -106,7 +124,7 @@ class Sampler:
         net_rates = self.net.take(now) if self.net.active else {}
         gpu_util, self._gpu_system = self.gpu.sample()
         threshold = self.settings.cpu_threshold
-        procs: dict[int, ProcSample] = {}
+        procs: list[tuple[int, str, list[float]]] = []
         io_now: dict[int, tuple[float, float, float]] = {}
 
         if self._kernel_snapshot is not None:
@@ -115,7 +133,7 @@ class Sampler:
             self._collect_psutil(now, procs, io_now, net_rates, gpu_util, threshold)
 
         self._io_prev = io_now
-        snap = Snapshot(ts=now, procs=procs, system=self._system(now))
+        snap = Snapshot.pack(now, procs, self._system(now))
         self.store.append(snap)
         self.samples += 1
         return snap
@@ -151,7 +169,7 @@ class Sampler:
             if threshold > 0 and cpu_core < threshold and not any(
                     values[i] for i in (_I_DR, _I_DW, _I_ND, _I_NU, _I_GPU)):
                 continue
-            procs[pid] = ProcSample(pid, info.name, values)
+            procs.append((pid, info.name, values))
         self._cpu_prev = cpu_now
 
     def _collect_psutil(self, now, procs, io_now, net_rates, gpu_util, threshold) -> None:
@@ -187,12 +205,12 @@ class Sampler:
             if threshold > 0 and cpu_core < threshold and not any(
                     values[i] for i in (_I_DR, _I_DW, _I_ND, _I_NU, _I_GPU)):
                 continue        # user asked to ignore quiet processes
-            procs[pid] = ProcSample(pid, name, values)
+            procs.append((pid, name, values))
 
     def _system(self, now: float) -> dict[str, float]:
         vm = psutil.virtual_memory()
         disk = psutil.disk_io_counters()
-        net = psutil.net_io_counters()
+        net = _net_counters()
         sysd = {
             "cpu": float(psutil.cpu_percent(interval=None)),
             "mem": float(vm.used),

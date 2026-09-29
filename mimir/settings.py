@@ -24,6 +24,7 @@ class Settings:
 
     # ranking / table
     ranking_window: int = 30            # seconds averaged for avg/max columns
+    cpu_smoothing: int = 5              # seconds averaged for the CPU "current" column (1 = last sample)
     group_by_name: bool = True
     hide_idle: bool = True
     table_rows: int = 40
@@ -33,6 +34,7 @@ class Settings:
 
     # chart
     chart_seconds: int = 120
+    selected_chart_seconds: int = 300   # span when one process is selected
     chart_lines: int = 8                # top-N entities when nothing is selected
     chart_group: str = "cpu"
 
@@ -46,8 +48,10 @@ class Settings:
         self.history_seconds = _clamp(int(self.history_seconds), 60, 24 * 3600)
         self.cpu_threshold = _clamp(float(self.cpu_threshold), 0.0, 100.0)
         self.ranking_window = _clamp(int(self.ranking_window), 2, 3600)
+        self.cpu_smoothing = _clamp(int(self.cpu_smoothing), 1, 60)
         self.table_rows = _clamp(int(self.table_rows), 5, 500)
         self.chart_seconds = _clamp(int(self.chart_seconds), 10, 24 * 3600)
+        self.selected_chart_seconds = _clamp(int(self.selected_chart_seconds), 10, 24 * 3600)
         self.chart_lines = _clamp(int(self.chart_lines), 1, 10)
         self.window_width = _clamp(int(self.window_width), 900, 8000)
         self.window_height = _clamp(int(self.window_height), 600, 5000)

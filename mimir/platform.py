@@ -28,6 +28,35 @@ def is_admin() -> bool:
         return False
 
 
+def can_sniff() -> bool:
+    """Rights to copy packets: Administrator on Windows; root or CAP_NET_RAW on Linux."""
+    if IS_WINDOWS:
+        return is_admin()
+    if is_admin():
+        return True
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("CapEff:"):
+                return bool(int(line.split()[1], 16) >> 13 & 1)     # bit 13 = CAP_NET_RAW
+    except OSError:
+        pass
+    return False
+
+
+def physical_nics() -> set[str] | None:
+    """Interfaces that carry traffic off the machine, or None for "all of them".
+
+    On Linux loopback, VPN tunnels, bridges and veth pairs repeat traffic that a
+    real NIC also carries (a VPN counts twice), so only NICs backed by a device count.
+    """
+    if not IS_LINUX:
+        return None
+    try:
+        return {n for n in os.listdir("/sys/class/net") if os.path.exists(f"/sys/class/net/{n}/device")}
+    except OSError:
+        return None
+
+
 def can_elevate() -> bool:
     return IS_WINDOWS and not is_admin()
 
@@ -100,8 +129,10 @@ def font_candidates() -> list[tuple[str, str]]:
         d = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
         return [(str(d / "segoeui.ttf"), str(d / "seguisb.ttf"))]
     roots = [Path("/usr/share/fonts"), Path("/usr/local/share/fonts"), Path.home() / ".fonts"]
-    pairs = [("NotoSans-Regular.ttf", "NotoSans-SemiBold.ttf"),
+    # Noto Sans last: it has no arrows or dots (the UI uses ↓ ↑ ●). DejaVu has them but runs wide.
+    pairs = [("NimbusSans-Regular.otf", "NimbusSans-Bold.otf"),
              ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"),
+             ("NotoSans-Regular.ttf", "NotoSans-SemiBold.ttf"),
              ("Ubuntu-R.ttf", "Ubuntu-M.ttf")]
     out = []
     for root in roots:
@@ -118,4 +149,4 @@ def font_candidates() -> list[tuple[str, str]]:
 def elevation_hint() -> str:
     if IS_WINDOWS:
         return "Restart as administrator to attribute network traffic to processes."
-    return "Run with sudo (or grant CAP_NET_RAW) to attribute network traffic to processes."
+    return "Run ./setup.sh (grants CAP_NET_RAW to the venv python) to attribute network traffic to processes."

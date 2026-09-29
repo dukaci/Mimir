@@ -53,6 +53,7 @@ class Fonts:
     dot = "*"
     arrow_down = "v"
     arrow_up = "^"
+    peak = "max"
 
 
 def setup_fonts() -> None:
@@ -63,6 +64,7 @@ def setup_fonts() -> None:
             with dpg.font_registry():
                 dpg.add_font(regular, 17, tag="font_ui")
                 dpg.add_font(regular, 14, tag="font_small")
+                dpg.add_font(regular, 15, tag="font_table")
                 dpg.add_font(regular, 30, tag="font_big")
                 dpg.add_font(semibold if os.path.exists(semibold) else regular, 26, tag="font_title")
                 dpg.add_font(semibold if os.path.exists(semibold) else regular, 18, tag="font_heading")
@@ -71,6 +73,7 @@ def setup_fonts() -> None:
             Fonts.dot = "●"
             Fonts.arrow_down = "↓"
             Fonts.arrow_up = "↑"
+            Fonts.peak = "▲"
             return
         except Exception as e:      # bad font file: keep the built-in one
             log.warning("could not load font %s: %s", regular, e)
@@ -146,10 +149,10 @@ def setup_themes() -> None:
             col(dpg.mvThemeCol_ResizeGripHovered, (*BLUE, 120))
             col(dpg.mvThemeCol_ResizeGripActive, BLUE)
             col(dpg.mvThemeCol_ModalWindowDimBg, (0, 0, 0, 140))
-            sty(dpg.mvStyleVar_WindowPadding, 14, 12)
-            sty(dpg.mvStyleVar_FramePadding, 10, 6)
-            sty(dpg.mvStyleVar_ItemSpacing, 10, 8)
-            sty(dpg.mvStyleVar_ItemInnerSpacing, 8, 6)
+            sty(dpg.mvStyleVar_WindowPadding, 10, 8)
+            sty(dpg.mvStyleVar_FramePadding, 8, 4)
+            sty(dpg.mvStyleVar_ItemSpacing, 8, 6)
+            sty(dpg.mvStyleVar_ItemInnerSpacing, 6, 4)
             sty(dpg.mvStyleVar_CellPadding, 8, 5)
             sty(dpg.mvStyleVar_FrameRounding, 6)
             sty(dpg.mvStyleVar_ChildRounding, 10)
@@ -187,14 +190,14 @@ def setup_themes() -> None:
             dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1)
     with dpg.theme(tag="theme_card"):
         with dpg.theme_component(dpg.mvChildWindow):
-            dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 16, 14)
+            dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 10, 8)
     with dpg.theme(tag="theme_tile"):
         with dpg.theme_component(dpg.mvChildWindow):
-            dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 14, 10)
+            dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 10, 6)
             dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 2)
     with dpg.theme(tag="theme_tile_active"):
         with dpg.theme_component(dpg.mvChildWindow):
-            dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 14, 10)
+            dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 10, 6)
             dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 2)
             dpg.add_theme_color(dpg.mvThemeCol_Border, BLUE)
             dpg.add_theme_color(dpg.mvThemeCol_ChildBg, (36, 37, 56))
@@ -205,14 +208,15 @@ def setup_themes() -> None:
             dpg.add_theme_color(dpg.mvPlotCol_FrameBg, (0, 0, 0, 0), category=dpg.mvThemeCat_Plots)
             dpg.add_theme_style(dpg.mvPlotStyleVar_PlotPadding, 0, 0, category=dpg.mvThemeCat_Plots)
             dpg.add_theme_style(dpg.mvPlotStyleVar_PlotBorderSize, 0, category=dpg.mvThemeCat_Plots)
-    with dpg.theme(tag="theme_bar"):
+    with dpg.theme(tag="theme_table"):
+        # mvAll: the table's rows and cells inherit it, not only the table item
+        with dpg.theme_component(dpg.mvAll):
+            dpg.add_theme_style(dpg.mvStyleVar_CellPadding, 6, 2)
+            dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 0)
         with dpg.theme_component(dpg.mvProgressBar):
             dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (*SURFACE0, 140))
-            dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 4)
-            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 6, 2)
-    with dpg.theme(tag="theme_table"):
-        with dpg.theme_component(dpg.mvTable):
-            dpg.add_theme_style(dpg.mvStyleVar_CellPadding, 8, 5)
+            dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 3)
+            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 4, 0)
 
 
 _series_themes: dict[tuple, int] = {}

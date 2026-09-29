@@ -17,7 +17,7 @@ import dearpygui.dearpygui as dpg
 
 from .. import __version__
 from ..gpu import GpuMonitor
-from ..history import EntityKey, EntityRow, HistoryStore
+from ..history import EntityKey, EntityRow, HistoryStore, rank
 from ..killer import kill_processes
 from ..metrics import (CHART_GROUPS, CHART_GROUP_BY_ID, PROCESS_METRIC_BY_ID, PROCESS_METRIC_INDEX,
                        SYSTEM_METRIC_BY_ID, TILES, Metric, axis_label, axis_scale, format_clock,
@@ -34,20 +34,34 @@ log = logging.getLogger(__name__)
 
 WINDOW_TITLE = "Mimir"
 
+SORT_ARROW_ROOM = 18      # px the sort arrow takes beside a header label
+NAME_MAX_WIDTH = 240      # px cap on the Process column; longer names end in … with a tooltip
+BAR_ROOM = 24             # px of bar around the CPU value, so the bar still reads as a gauge
+IDLE_AFTER = 1.0          # s without mouse or key input before frames slow down
+IDLE_FRAME = 0.1          # s between frames when idle: nothing on screen changes faster than that
+
+def column_label(header: str, field: str) -> str:
+    """Header text; peak columns carry the peak mark (▲ when the font has it)."""
+    return f"{header} {Fonts.peak}" if field == "peak" else header
+
+
 TABLE_COLUMNS = [
     # (header, metric id, field) - field None means a non-sortable text column
     ("CPU", "cpu", "current"),
-    ("CPU peak", "cpu", "peak"),
+    ("CPU", "cpu", "peak"),
     ("Memory", "mem", "current"),
-    ("Mem peak", "mem", "peak"),
+    ("Mem", "mem", "peak"),
     ("Disk R", "disk_read", "current"),
     ("Disk W", "disk_write", "current"),
     ("Down", "net_down", "current"),
     ("Up", "net_up", "current"),
     ("GPU", "gpu", "current"),
     ("VRAM", "gpu_mem", "current"),
-    ("VRAM peak", "gpu_mem", "peak"),
+    ("VRAM", "gpu_mem", "peak"),
 ]
+# Widget per number column (PID, then TABLE_COLUMNS): peak cells carry a tooltip with the time
+CELL_KINDS = ["text"] + ["bar" if (mid, field) == ("cpu", "current") else "tip" if field == "peak" else "text"
+                         for _, mid, field in TABLE_COLUMNS]
 
 
 class App:
@@ -80,6 +94,8 @@ class App:
         self.chart_colors: dict = {}
         self._color_slots: dict = {}                # entity key -> [palette index, last seen]
         self._row_items: list[tuple[int, EntityRow]] = []
+        self._pool: list[dict] = []                 # table rows, updated in place and never rebuilt
+        self._last_input = time.time()
         self._kill_target: Optional[dict] = None    # {"name", "pids", "key"} awaiting confirmation
         self._next_table = 0.0
         self._next_chart = 0.0
@@ -106,11 +122,16 @@ class App:
 
         self._build_settings_window()
         self._build_kill_window()
+        with dpg.handler_registry():
+            for add in (dpg.add_mouse_move_handler, dpg.add_mouse_wheel_handler, dpg.add_mouse_click_handler,
+                        dpg.add_key_press_handler):
+                add(callback=self._on_input)
 
         icon = str(ICON_FILE) if ICON_FILE.exists() else ""
         dpg.create_viewport(title=WINDOW_TITLE, width=s.window_width, height=s.window_height,
                             min_width=1000, min_height=650, clear_color=T.MANTLE,
                             small_icon=icon, large_icon=icon)
+        dpg.set_viewport_resize_callback(self._on_input)
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("main_window", True)
@@ -154,7 +175,7 @@ class App:
         with dpg.group(horizontal=True, tag="tiles_row"):
             for tile_id, label, metrics in TILES:
                 tag = f"tile_{tile_id}"
-                with dpg.child_window(tag=tag, width=-1 if tile_id == TILES[-1][0] else 0, height=112,
+                with dpg.child_window(tag=tag, width=-1 if tile_id == TILES[-1][0] else 0, height=92,
                                       no_scrollbar=True):
                     with dpg.group(horizontal=True):
                         h = dpg.add_text(label, color=T.SUBTEXT)
@@ -184,29 +205,29 @@ class App:
             with dpg.group(horizontal=True):
                 h = dpg.add_text("Processes")
                 bind_font(h, "font_heading")
+                with dpg.tooltip(h):
+                    dpg.add_text("Click a row to chart it. Right-click a row or a legend entry to end that process.\n"
+                                 "Click a column header to sort.")
                 dpg.add_spacer(width=12)
                 dpg.add_input_text(tag="search", hint="filter by name", width=220, callback=self.on_filter)
                 dpg.add_checkbox(label="Group by name", default_value=s.group_by_name, callback=self.on_group)
                 dpg.add_checkbox(label="Hide idle", default_value=s.hide_idle, callback=self.on_hide_idle)
-            dpg.add_text("Click a row to chart it. Right-click a row or a legend entry to end that process. "
-                         "Click a column header to sort.", color=T.SUBTEXT)
-            dpg.add_spacer(height=2)
+            # No set widths and not resizable: ImGui fits every column to its contents each frame.
             with dpg.table(tag="proc_table", header_row=True, row_background=True, borders_innerH=True,
-                           resizable=True, scrollY=True, scrollX=True, height=-1, sortable=True,
+                           resizable=False, scrollY=True, scrollX=True, height=-1, sortable=True,
                            policy=dpg.mvTable_SizingFixedFit, callback=self.on_sort, freeze_rows=1,
                            freeze_columns=2):
-                dpg.add_table_column(label="#", no_sort=True, width_fixed=True, init_width_or_weight=34)
-                dpg.add_table_column(label="Process", no_sort=True, width_fixed=True, init_width_or_weight=210)
-                dpg.add_table_column(label="PID", no_sort=True, width_fixed=True, init_width_or_weight=64)
+                dpg.add_table_column(label="#", no_sort=True, width_fixed=True)
+                dpg.add_table_column(label="Process", no_sort=True, width_fixed=True)
+                dpg.add_table_column(label="PID", no_sort=True, width_fixed=True)
                 for header, mid, field in TABLE_COLUMNS:
                     tag = f"col_{mid}_{field}"
-                    width = 96 if mid == "cpu" and field == "current" else 80
-                    dpg.add_table_column(label=header, tag=tag, width_fixed=True, init_width_or_weight=width,
+                    dpg.add_table_column(label=column_label(header, field), tag=tag, width_fixed=True,
                                          prefer_sort_descending=True,
                                          default_sort=(mid == s.sort_metric and field == s.sort_field))
             dpg.bind_item_theme("proc_table", "theme_table")
+            bind_font("proc_table", "font_table")
         dpg.bind_item_theme("left_panel", "theme_card")
-        dpg.bind_item_theme("left_panel", "theme_bar")
 
     def _build_chart_panel(self) -> None:
         with dpg.child_window(width=-1, height=-34, tag="right_panel"):
@@ -238,7 +259,7 @@ class App:
 
     def _build_settings_window(self) -> None:
         s = self.settings
-        with dpg.window(label="Settings", tag="settings_win", modal=True, show=False, width=560, height=470,
+        with dpg.window(label="Settings", tag="settings_win", modal=True, show=False, width=560, height=530,
                         no_resize=True, no_collapse=True, pos=(300, 160)):
             dpg.add_text("Sampling", color=T.BLUE)
             dpg.add_slider_float(label="interval (s)", default_value=s.sample_interval, min_value=0.2,
@@ -254,12 +275,17 @@ class App:
             dpg.add_text("Table", color=T.BLUE)
             dpg.add_slider_int(label="ranking window (s)", default_value=s.ranking_window, min_value=2,
                                max_value=600, width=280, callback=self._setter("ranking_window", int))
+            dpg.add_slider_int(label="CPU column average (s)", default_value=s.cpu_smoothing, min_value=1,
+                               max_value=60, width=280, callback=self._setter("cpu_smoothing", int))
             dpg.add_slider_int(label="rows", default_value=s.table_rows, min_value=5, max_value=200,
                                width=280, callback=self._setter("table_rows", int))
             dpg.add_spacer(height=6)
             dpg.add_text("Chart", color=T.BLUE)
             dpg.add_slider_int(label="chart span (s)", default_value=s.chart_seconds, min_value=10,
                                max_value=3600, width=280, callback=self._setter("chart_seconds", int))
+            dpg.add_slider_int(label="chart span, one process (s)", default_value=s.selected_chart_seconds,
+                               min_value=10, max_value=3600, width=280,
+                               callback=self._setter("selected_chart_seconds", int))
             dpg.add_slider_int(label="top processes charted", default_value=s.chart_lines, min_value=1,
                                max_value=10, width=280, callback=self._setter("chart_lines", int))
             dpg.add_spacer(height=10)
@@ -273,6 +299,9 @@ class App:
             self.settings.validate()
             self._invalidate()
         return cb
+
+    def _on_input(self, *_) -> None:
+        self._last_input = time.time()
 
     def _invalidate(self) -> None:
         self._next_table = self._next_chart = self._next_tiles = 0.0
@@ -491,12 +520,9 @@ class App:
         if dpg.does_item_exist("kill_win") and dpg.is_item_shown("kill_win"):
             return                      # keep rows stable while the confirmation is open
         self._row_items = []
-        self.rows = self.store.rankings(
-            seconds=s.ranking_window, grouped=s.group_by_name, hide_idle=s.hide_idle,
-            name_filter=self.name_filter, sort_metric=s.sort_metric, sort_field=s.sort_field,
-            descending=s.sort_descending, limit=s.table_rows)
-        for child in dpg.get_item_children("proc_table", 1) or []:
-            dpg.delete_item(child)
+        rows = self.store.aggregate(seconds=s.ranking_window, grouped=s.group_by_name, hide_idle=s.hide_idle,
+                                    name_filter=self.name_filter, cpu_smooth=s.cpu_smoothing)
+        self.rows = rank(rows, s.sort_metric, s.sort_field, s.sort_descending, s.table_rows)
 
         sel_key = self.selection["key"] if self.selection else None
         i_cpu = PROCESS_METRIC_INDEX["cpu"]
@@ -508,13 +534,10 @@ class App:
         colors = {}
         for mids in self._panels(group.metrics, PROCESS_METRIC_BY_ID):
             mid = mids[0]
-            rows = self.store.rankings(
-                seconds=s.ranking_window, grouped=s.group_by_name, hide_idle=s.hide_idle,
-                name_filter=self.name_filter, sort_metric=mid, sort_field="current",
-                descending=True, limit=s.chart_lines, only_alive=True)
-            rows = [r for r in rows if r.current[PROCESS_METRIC_INDEX[mid]] > 0]
-            self.top_rows_by[mid] = rows
-            for r in rows:
+            top = rank(rows, mid, "current", True, s.chart_lines, only_alive=True)
+            top = [r for r in top if r.current[PROCESS_METRIC_INDEX[mid]] > 0]
+            self.top_rows_by[mid] = top
+            for r in top:
                 if r.key not in colors:
                     colors[r.key] = None
         self.chart_colors = self._assign_colors(list(colors))
@@ -524,44 +547,119 @@ class App:
         net_on = self.net.active
         gpu_on = self.gpu.per_process
 
-        for rank, row in enumerate(self.rows, 1):
+        # Cells of the number columns (PID and TABLE_COLUMNS), built first so every
+        # column can be right-aligned to its widest value.
+        headers = ["PID"] + [column_label(h, f) for h, _, f in TABLE_COLUMNS]
+        grid = [self._number_cells(row, top_cpu, net_on, gpu_on) for row in self.rows]
+        widths = [max([self._text_width(h) + SORT_ARROW_ROOM] +
+                      [self._text_width(cells[c][1]) + (BAR_ROOM if cells[c][0] == "bar" else 0)
+                       for cells in grid])
+                  for c, h in enumerate(headers)]
+
+        while len(self._pool) < len(self.rows):
+            self._pool.append(self._pool_row())
+        for k, slot in enumerate(self._pool):
+            shown = k < len(self.rows)
+            if slot["shown"] != shown:
+                dpg.configure_item(slot["row"], show=shown)
+                slot["shown"] = shown
+
+        for slot, row, cells in zip(self._pool, self.rows, grid):
             selected = row.key == sel_key
-            with dpg.table_row(parent="proc_table"):
-                item = dpg.add_selectable(label=f"{rank}", span_columns=True, default_value=selected,
-                                          callback=self.on_row_click, user_data=row)
-                self._row_items.append((item, row))
-                if selected:
-                    color = T.BLUE
-                elif row.key in charted:
-                    color = charted[row.key]
+            dpg.configure_item(slot["sel"], user_data=row)
+            dpg.set_value(slot["sel"], selected)
+            self._row_items.append((slot["sel"], row))
+            if selected:
+                color = T.BLUE
+            elif row.key in charted:
+                color = charted[row.key]
+            else:
+                color = T.TEXT if row.alive else T.OVERLAY0
+            label = self._fit_label(row)
+            dpg.set_value(slot["name"], label)
+            dpg.configure_item(slot["name"], color=color)
+            dpg.configure_item(slot["name_tip"], show=label != row.label)
+            dpg.set_value(slot["name_full"], row.label)
+            for (kind, text, color, extra), width, (item, tip, tip_text) in zip(cells, widths, slot["cells"]):
+                if kind == "bar":
+                    dpg.set_value(item, extra)
+                    dpg.configure_item(item, overlay=text, width=int(width))
+                    continue
+                pad = width - self._text_width(text)
+                dpg.set_value(item, text)
+                dpg.configure_item(item, color=color, indent=pad if pad > 0 else -1)
+                if tip is not None:
+                    dpg.configure_item(tip, show=bool(extra))
+                    dpg.set_value(tip_text, extra or "")
+
+    def _pool_row(self) -> dict:
+        """One reusable table row: rank selectable, name with tooltip, one widget per CELL_KINDS entry."""
+        with dpg.table_row(parent="proc_table") as row:
+            sel = dpg.add_selectable(label=str(len(self._pool) + 1), span_columns=True, callback=self.on_row_click)
+            name = dpg.add_text("")
+            with dpg.tooltip(name, show=False) as name_tip:
+                name_full = dpg.add_text("")
+            cells = []
+            for kind in CELL_KINDS:
+                if kind == "bar":
+                    cells.append((dpg.add_progress_bar(), None, None))
+                    continue
+                item = dpg.add_text("")
+                tip = tip_text = None
+                if kind == "tip":
+                    with dpg.tooltip(item, show=False) as tip:
+                        tip_text = dpg.add_text("")
+                cells.append((item, tip, tip_text))
+        return {"row": row, "sel": sel, "name": name, "name_tip": name_tip, "name_full": name_full,
+                "cells": cells, "shown": True}
+
+    def _number_cells(self, row: EntityRow, top_cpu: float, net_on: bool, gpu_on: bool) -> list[tuple]:
+        """(kind, text, colour, extra) per number column; extra is the bar fill or a tooltip."""
+        cells = [("text", str(row.pids[0]) if len(row.pids) == 1 else f"{len(row.pids)} pids",
+                  T.OVERLAY1, None)]
+        for header, mid, field in TABLE_COLUMNS:
+            metric = PROCESS_METRIC_BY_ID[mid]
+            mi = PROCESS_METRIC_INDEX[mid]
+            if field == "peak":
+                p = row.peaks[mi]
+                if (mid == "gpu_mem" and not gpu_on) or not (p and p.value > 0):
+                    cells.append(("text", "-", T.OVERLAY0, None))
                 else:
-                    color = T.TEXT if row.alive else T.OVERLAY0
-                dpg.add_text(row.label, color=color)
-                dpg.add_text(str(row.pids[0]) if len(row.pids) == 1 else f"{len(row.pids)} pids", color=T.OVERLAY1)
-                for header, mid, field in TABLE_COLUMNS:
-                    metric = PROCESS_METRIC_BY_ID[mid]
-                    mi = PROCESS_METRIC_INDEX[mid]
-                    if field == "peak":
-                        p = row.peaks[mi]
-                        if mid == "gpu_mem" and not gpu_on:
-                            dpg.add_text("-", color=T.OVERLAY0)
-                        elif p and p.value > 0:
-                            dpg.add_text(format_value(metric, p.value), color=T.SUBTEXT)
-                            with dpg.tooltip(dpg.last_item()):
-                                dpg.add_text(f"peak at {format_clock(p.ts)}")
-                        else:
-                            dpg.add_text("-", color=T.OVERLAY0)
-                        continue
-                    v = row.current[mi]
-                    if mid == "cpu":
-                        dpg.add_progress_bar(default_value=min(1.0, v / top_cpu), overlay=f"{v:.1f}%", width=-1)
-                    elif mid in ("net_down", "net_up") and not net_on:
-                        dpg.add_text("-", color=T.OVERLAY0)
-                    elif mid in ("gpu", "gpu_mem") and not gpu_on:
-                        dpg.add_text("-", color=T.OVERLAY0)
-                    else:
-                        dim = v <= 0
-                        dpg.add_text(format_value(metric, v), color=T.OVERLAY0 if dim else T.TEXT)
+                    cells.append(("text", format_value(metric, p.value), T.SUBTEXT,
+                                  f"peak at {format_clock(p.ts)}"))
+                continue
+            v = row.current[mi]
+            if mid == "cpu":
+                cells.append(("bar", f"{v:.1f}%", None, min(1.0, v / top_cpu)))
+            elif (mid in ("net_down", "net_up") and not net_on) or (mid in ("gpu", "gpu_mem") and not gpu_on):
+                cells.append(("text", "-", T.OVERLAY0, None))
+            else:
+                cells.append(("text", format_value(metric, v), T.OVERLAY0 if v <= 0 else T.TEXT, None))
+        return cells
+
+    def _fit_label(self, row: EntityRow) -> str:
+        """Row label cut to NAME_MAX_WIDTH, keeping the instance count."""
+        if self._text_width(row.label) <= NAME_MAX_WIDTH:
+            return row.label
+        count = f" ({len(row.pids)})" if len(row.pids) > 1 else ""
+        name = row.name
+        while name and self._text_width(name + "…" + count) > NAME_MAX_WIDTH:
+            name = name[:-1]
+        return name + "…" + count
+
+    _widths: dict[str, float] = {}      # text -> px in the table font, which does not change during a run
+
+    @staticmethod
+    def _text_width(text: str) -> float:
+        w = App._widths.get(text)
+        if w is None:
+            size = dpg.get_text_size(text, font="font_table" if Fonts.loaded else 0)
+            w = size[0] if size else 0.0
+            if w > 0:               # zero before the first frame, while the font atlas is not built
+                if len(App._widths) > 4096:
+                    App._widths.clear()
+                App._widths[text] = w
+        return w
 
     # ---------------------------------------------------------------- chart
     def _assign_colors(self, keys: list) -> dict:
@@ -617,19 +715,19 @@ class App:
 
     def _chart_panels(self) -> list[dict]:
         """One dict per plot: prefix, x (relative seconds), series, primary metric, peak key."""
-        s = self.settings
         group = CHART_GROUP_BY_ID[self.chart_group]
         out = []
         if self.scope == "system":
             for i, mids in enumerate(self._panels(group.system_metrics, SYSTEM_METRIC_BY_ID)):
-                b = self.store.system_series(mids, s.chart_seconds)
+                b = self.store.system_series(mids, self._chart_span())
                 metrics = [SYSTEM_METRIC_BY_ID[m] for m in mids]
                 series = [(("sys", m.id), m.label, b.values[m.id], m.color, m) for m in metrics]
                 out.append({"prefix": "_b" if i else "", "ts": b.ts, "series": series,
                             "primary": metrics[0], "peak": ("sys", metrics[0].id)})
         elif self.scope == "selected" and self.selection:
             for i, mids in enumerate(self._panels(group.metrics, PROCESS_METRIC_BY_ID)):
-                b = self.store.entity_series(self.selection["key"], mids, s.chart_seconds, self.selection["pids"])
+                b = self.store.entity_series(self.selection["key"], mids, self._chart_span(),
+                                             self.selection["pids"])
                 metrics = [PROCESS_METRIC_BY_ID[m] for m in mids]
                 series = [(("sel", m.id), m.label, b.values[m.id], m.color, m) for m in metrics]
                 out.append({"prefix": "_b" if i else "", "ts": b.ts, "series": series,
@@ -639,21 +737,25 @@ class App:
                 primary = PROCESS_METRIC_BY_ID[mids[0]]
                 rows = self.top_rows_by.get(primary.id, [])
                 ts, lists = self.store.multi_entity_series([(r.key, r.pids) for r in rows], primary.id,
-                                                           s.chart_seconds)
+                                                           self._chart_span())
                 series = [(("top", r.key), self._short_label(r), y, self.chart_colors.get(r.key, T.BLUE), primary)
                           for r, y in zip(rows, lists)]
                 out.append({"prefix": "_b" if i else "", "ts": ts, "series": series,
                             "primary": primary, "peak": None})
         return out
 
-    def update_chart(self) -> None:
+    def _chart_span(self) -> int:
+        """Seconds the chart shows: longer for one selected process than for the overview."""
         s = self.settings
+        return s.selected_chart_seconds if self.scope == "selected" and self.selection else s.chart_seconds
+
+    def update_chart(self) -> None:
         panels = self._chart_panels()
         split = len(panels) > 1
         self._layout_plots(split)
         now = time.time()
         x_max = now - self.t0
-        x_min = x_max - s.chart_seconds
+        x_min = x_max - self._chart_span()
         ticks = self._time_ticks(x_min, x_max)
         for panel in panels:
             self._render_panel(panel, x_min, x_max, ticks)
@@ -803,7 +905,7 @@ class App:
                     title = f"{primaries[0].label}  -  no process is using it"
                 sub = f"highest current {primaries[0].label.lower()}"
             sub += f",  {'grouped by name' if s.group_by_name else 'individual processes'}"
-        sub += f"   |   last {s.chart_seconds}s"
+        sub += f"   |   last {self._chart_span()}s"
         dpg.set_value("chart_title", title)
         dpg.set_value("chart_sub", sub)
 
@@ -896,7 +998,7 @@ class App:
                  f"sample took {self.sampler.last_sample_ms:.0f} ms"]
         latest = self.store.latest()
         if latest:
-            parts.append(f"{len(latest.procs)} processes via {self.sampler.backend}")
+            parts.append(f"{len(latest)} processes via {self.sampler.backend}")
         if self.gpu.available:
             parts.append(f"{self.gpu.name} via {self.gpu.source}")
         if self.net.active:
@@ -944,6 +1046,8 @@ class App:
                     shot_at = None
                     dpg.stop_dearpygui()
                 dpg.render_dearpygui_frame()
+                if now - self._last_input > IDLE_AFTER:
+                    time.sleep(IDLE_FRAME)
         finally:
             self._persist_window()
             self.settings.save(SETTINGS_FILE)

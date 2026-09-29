@@ -1,6 +1,6 @@
 # Mimir
 
-Per-process resource monitor for Windows 11 (Linux planned) that keeps history
+Per-process resource monitor for Windows 11 and Linux that keeps history
 and peaks. Think Task Manager's *Processes* tab, but every value is charted over
 time and the peak of every metric is remembered with the moment it happened.
 
@@ -18,6 +18,20 @@ run_admin.bat    :: start elevated - enables per-process network stats
 
 Or `venv\Scripts\python.exe -m mimir`. `--help` lists options
 (`--interval`, `--no-network`, `--log-level`, `--shot`).
+
+On Linux:
+
+```sh
+./setup.sh       # once - creates venv/ and grants the venv python its capture rights
+./run.sh         # start Mimir (per-process network stats included)
+```
+
+`setup.sh` creates the venv with its own copy of python (`--copies`) and gives
+that copy `cap_net_raw` (copy packets) plus `cap_dac_read_search` and
+`cap_sys_ptrace` (read other users' `/proc/<pid>/fd`, so traffic of root-owned
+processes such as openvpn is attributed too). Any code this interpreter runs can
+then read every file and process on the machine. `./setup.sh --no-caps` skips
+that; everything except per-process network still works.
 
 ## Using it
 
@@ -47,8 +61,14 @@ Or `venv\Scripts\python.exe -m mimir`. `--help` lists options
 On Windows every sample is one `NtQuerySystemInformation` call, the same API
 Task Manager uses. It returns CPU times, private working set, I/O counters and
 thread counts for all processes at once in a few milliseconds, with no
-per-process handles, so protected processes are included. psutil is the
-fallback on other platforms (and needs about 100x longer per sample here).
+per-process handles, so protected processes are included. On Linux Mimir reads
+`/proc/<pid>/stat` and `/proc/<pid>/io` directly, two reads per process and
+about 5x faster than psutil for the same counters. psutil is the fallback on
+other platforms (and needs about 100x longer per sample on Windows).
+
+The window redraws at full rate only while the mouse or keyboard is in use.
+After one second without input it drops to about 10 frames per second, which
+is still faster than any value on screen changes.
 
 ## GPU figures
 
@@ -69,6 +89,12 @@ queued, delayed, or re-injected by Mimir, so a slow or crashed Mimir cannot
 affect traffic. Each packet is matched to its owning PID through the socket
 table from `psutil.net_connections()`.
 
+On Linux an `AF_PACKET` socket plays the same role: the kernel hands it a
+copy of each packet, and when Python falls behind the socket buffer drops
+copies, never traffic. Loopback is skipped. On a VPN, application traffic is
+attributed on the tunnel interface and the encrypted outer traffic to the VPN
+client (openvpn), so the VPN client's figure is the tunnel total.
+
 The previous version opened WinDivert in *divert* mode, which pulled every
 packet on the machine into Python and required Mimir to send it back out. Any
 stall in the Python loop then delayed or dropped real traffic, which is what
@@ -83,7 +109,7 @@ mimir/
   metrics.py       metric definitions, formatting
   history.py       thread-safe snapshot store, peaks, rankings, series queries
   sampler.py       background psutil/NVML sampling thread
-  netcapture.py    passive per-process network attribution (WinDivert sniff)
+  netcapture.py    passive per-process network attribution (WinDivert sniff / AF_PACKET)
   winproc.py       one-call process snapshot via NtQuerySystemInformation (Windows)
   gpu.py           optional NVML wrapper
   platform.py      OS specifics: admin check, elevation, font paths
@@ -96,8 +122,7 @@ tests/             pytest unit tests for the store, metrics and settings
 
 Design rules: the sampler never touches the UI; the UI only reads the store on
 the render thread; anything OS-specific lives in `platform.py` or behind the
-`NetworkAttributor` interface so a Linux backend can be added without touching
-the rest.
+`NetworkAttributor` interface.
 
 ## Development
 
