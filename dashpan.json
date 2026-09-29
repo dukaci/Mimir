@@ -3,8 +3,8 @@
   "group": "Tools",
   "description": "Per-process resource monitor with history and peaks: CPU, memory, disk, network, GPU. Docks as a native pane.",
   "tags": [
-    "python",
-    "dearpygui",
+    "cpp",
+    "imgui",
     "monitor"
   ],
   "targets": [
@@ -12,7 +12,7 @@
       "id": "app",
       "name": "Monitor",
       "kind": "native",
-      "cmd": "venv\\Scripts\\pythonw.exe -m mimir",
+      "cmd": "bin\\mimir.exe",
       "windowTitle": "^Mimir$",
       "icon": "assets\\mimir.ico"
     },

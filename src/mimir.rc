@@ -1,0 +1,2 @@
+// GLFW uses the icon named GLFW_ICON for its windows; Explorer shows it for the exe.
+GLFW_ICON ICON "../assets/mimir.ico"
